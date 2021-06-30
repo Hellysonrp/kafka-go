@@ -118,6 +118,11 @@ type Writer struct {
 	// The default is to flush at least every second.
 	BatchTimeout time.Duration
 
+	// If not Async, trigger all batches in WriteMessages
+	//
+	// The default is false
+	TriggerBatchesEarlier bool
+
 	// Timeout for read operations performed by the Writer.
 	//
 	// Defaults to 10 seconds.
@@ -268,6 +273,11 @@ type WriterConfig struct {
 	//
 	// The default is to flush at least every second.
 	BatchTimeout time.Duration
+
+	// If not Async, trigger all batches in WriteMessages
+	//
+	// The default is false
+	TriggerBatchesEarlier bool
 
 	// Timeout for read operations performed by the Writer.
 	//
@@ -474,22 +484,23 @@ func NewWriter(config WriterConfig) *Writer {
 	}
 
 	w := &Writer{
-		Addr:         TCP(config.Brokers...),
-		Topic:        config.Topic,
-		MaxAttempts:  config.MaxAttempts,
-		BatchSize:    config.BatchSize,
-		Balancer:     config.Balancer,
-		BatchBytes:   int64(config.BatchBytes),
-		BatchTimeout: config.BatchTimeout,
-		ReadTimeout:  config.ReadTimeout,
-		WriteTimeout: config.WriteTimeout,
-		RequiredAcks: RequiredAcks(config.RequiredAcks),
-		Async:        config.Async,
-		Logger:       config.Logger,
-		ErrorLogger:  config.ErrorLogger,
-		Transport:    transport,
-		transport:    transport,
-		writerStats:  stats,
+		Addr:                  TCP(config.Brokers...),
+		Topic:                 config.Topic,
+		MaxAttempts:           config.MaxAttempts,
+		BatchSize:             config.BatchSize,
+		Balancer:              config.Balancer,
+		BatchBytes:            int64(config.BatchBytes),
+		BatchTimeout:          config.BatchTimeout,
+		TriggerBatchesEarlier: config.TriggerBatchesEarlier,
+		ReadTimeout:           config.ReadTimeout,
+		WriteTimeout:          config.WriteTimeout,
+		RequiredAcks:          RequiredAcks(config.RequiredAcks),
+		Async:                 config.Async,
+		Logger:                config.Logger,
+		ErrorLogger:           config.ErrorLogger,
+		Transport:             transport,
+		transport:             transport,
+		writerStats:           stats,
 	}
 
 	if config.RequiredAcks == 0 {
@@ -512,17 +523,8 @@ func NewWriter(config WriterConfig) *Writer {
 func (w *Writer) Close() error {
 	w.markClosed()
 	// If batches are pending, trigger them so messages get sent.
-	w.mutex.Lock()
+	w.triggerAllBatches()
 
-	for _, batch := range w.batches {
-		batch.trigger()
-	}
-
-	for partition := range w.batches {
-		delete(w.batches, partition)
-	}
-
-	w.mutex.Unlock()
 	w.group.Wait()
 
 	if w.transport != nil {
@@ -618,6 +620,10 @@ func (w *Writer) WriteMessages(ctx context.Context, msgs ...Message) error {
 	batches := w.batchMessages(msgs, assignments)
 	if w.Async {
 		return nil
+	}
+
+	if w.TriggerBatchesEarlier {
+		w.triggerAllBatches()
 	}
 
 	done := ctx.Done()
@@ -990,6 +996,20 @@ func (w *Writer) chooseTopic(msg Message) (string, error) {
 	}
 
 	return w.Topic, nil
+}
+
+func (w *Writer) triggerAllBatches() {
+	w.mutex.Lock()
+
+	for _, batch := range w.batches {
+		batch.trigger()
+	}
+
+	for partition := range w.batches {
+		delete(w.batches, partition)
+	}
+
+	w.mutex.Unlock()
 }
 
 type writeBatch struct {
